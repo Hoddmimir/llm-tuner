@@ -272,6 +272,65 @@ canvas {
     font-weight: 600;
 }
 
+/* Status Log - Live Console Output */
+.status-log {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border-radius: 6px;
+    padding: 1rem;
+    margin-bottom: 1.5rem;
+    max-height: 300px;
+    overflow-y: auto;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.85rem;
+    line-height: 1.5;
+}
+
+.status-entry {
+    padding: 0.25rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.status-time {
+    color: #6b7280;
+    font-size: 0.8rem;
+    margin-right: 0.5rem;
+}
+
+.status-entry.status-info {
+    color: #93c5fd;
+}
+
+.status-entry.status-success {
+    color: #6ee7b7;
+}
+
+.status-entry.status-warning {
+    color: #fbbf24;
+}
+
+.status-entry.status-error {
+    color: #fca5a5;
+}
+
+/* Progress Bar */
+.progress-bar-container {
+    width: 100%;
+    height: 6px;
+    background: var(--border-color);
+    border-radius: 3px;
+    margin-bottom: 1rem;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+    border-radius: 3px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
 /* Utilities */
 .hidden {
     display: none !important;

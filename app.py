@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """LLM Tuner - Web Application Backend."""
 
+import asyncio
 import json
 import os
 import subprocess
@@ -11,10 +12,11 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+from threading import Lock
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -54,7 +56,10 @@ class BenchmarkResult(BaseModel):
 
 db: DatabaseManager | None = None
 hardware_cache: dict | None = None
-active_benchmarks: dict[str, dict] = {}  # id -> status info
+
+# Real-time status tracking
+benchmark_statuses: dict[str, dict] = {}  # id -> {status, messages, progress}
+statuses_lock = Lock()
 
 
 @asynccontextmanager
@@ -69,6 +74,8 @@ async def lifespan(app: FastAPI):
     # Detect hardware on startup
     detector = HardwareDetector()
     hardware_cache = detector.detect()
+    
+    print(f"LLM Tuner started. Hardware: {hardware_cache.get('vendor', 'unknown')}")
     
     yield
     
@@ -85,6 +92,86 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+
+def _emit_status(benchmark_id: str, message: str, level: str = "info"):
+    """Emit a status update for a benchmark."""
+    with statuses_lock:
+        if benchmark_id not in benchmark_statuses:
+            benchmark_statuses[benchmark_id] = {
+                "messages": [],
+                "progress": 0,
+                "status": "pending"
+            }
+        
+        entry = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "message": message,
+            "level": level
+        }
+        benchmark_statuses[benchmark_id]["messages"].append(entry)
+
+
+def _set_progress(benchmark_id: str, current: int, total: int):
+    """Update progress for a benchmark."""
+    with statuses_lock:
+        if benchmark_id in benchmark_statuses:
+            if total > 0:
+                benchmark_statuses[benchmark_id]["progress"] = round((current / total) * 100, 1)
+            benchmark_statuses[benchmark_id]["current_step"] = current
+            benchmark_statuses[benchmark_id]["total_steps"] = total
+
+
+def _set_status(benchmark_id: str, status: str):
+    """Set overall status for a benchmark."""
+    with statuses_lock:
+        if benchmark_id in benchmark_statuses:
+            benchmark_statuses[benchmark_id]["status"] = status
+
+
+# --- SSE Endpoint ---
+
+@app.get("/api/benchmarks/{benchmark_id}/stream")
+async def stream_status(benchmark_id: str):
+    """Server-Sent Events for real-time benchmark progress."""
+    
+    async def event_generator():
+        last_count = 0
+        
+        while True:
+            with statuses_lock:
+                status_data = benchmark_statuses.get(benchmark_id, {})
+                current_count = len(status_data.get("messages", []))
+            
+            # Send new messages since last check
+            if current_count > last_count:
+                msg_list = status_data.get("messages", [])
+                for msg in msg_list[last_count:]:
+                    yield f"data: {json.dumps(msg)}\n\n"
+                last_count = current_count
+            
+            # Send progress updates
+            progress = status_data.get("progress", 0)
+            status = status_data.get("status", "pending")
+            
+            if progress > 0 or status in ("completed", "failed"):
+                yield f"data: {json.dumps({'type': 'progress', 'value': progress, 'status': status})}\n\n"
+            
+            # Check if benchmark is done
+            if status in ("completed", "failed"):
+                break
+            
+            await asyncio.sleep(0.5)
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 # --- API Routes ---
@@ -126,6 +213,19 @@ async def start_benchmark(request: BenchmarkRequest, background_tasks: Backgroun
     if not Path(request.model_path).exists():
         raise HTTPException(status_code=400, detail=f"Model file not found: {request.model_path}")
     
+    # Initialize status tracking
+    with statuses_lock:
+        benchmark_statuses[benchmark_id] = {
+            "messages": [],
+            "progress": 0,
+            "status": "pending",
+            "current_step": 0,
+            "total_steps": 0
+        }
+    
+    _emit_status(benchmark_id, f"Starting benchmark: {request.benchmark_type}", "info")
+    _emit_status(benchmark_id, f"Model: {Path(request.model_path).name}", "info")
+    
     # Create database record
     record = {
         "id": benchmark_id,
@@ -155,7 +255,40 @@ def get_benchmark(benchmark_id: str):
     if not result:
         raise HTTPException(status_code=404, detail="Benchmark not found")
     
+    # Add real-time status info
+    with statuses_lock:
+        live_status = benchmark_statuses.get(benchmark_id)
+    
+    if live_status:
+        result["live"] = {
+            "messages": live_status.get("messages", []),
+            "progress": live_status.get("progress", 0),
+            "status": live_status.get("status", "unknown")
+        }
+    
     return result
+
+
+@app.get("/api/benchmarks/{benchmark_id}/status")
+def get_benchmark_status(benchmark_id: str):
+    """Get just the real-time status for a benchmark."""
+    with statuses_lock:
+        live = benchmark_statuses.get(benchmark_id)
+    
+    if not live:
+        # Check database as fallback
+        result = db.get_benchmark(benchmark_id)
+        if result:
+            return {"status": result.get("status", "unknown"), "messages": []}
+        raise HTTPException(status_code=404, detail="Benchmark not found")
+    
+    return {
+        "status": live.get("status", "unknown"),
+        "progress": live.get("progress", 0),
+        "current_step": live.get("current_step", 0),
+        "total_steps": live.get("total_steps", 0),
+        "messages": live.get("messages", [])
+    }
 
 
 @app.get("/api/history")
@@ -219,30 +352,43 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
     try:
         # Update status to running
         db.update_status(benchmark_id, "running")
+        _set_status(benchmark_id, "running")
         
-        engine = LlamaCppEngine(request.model_path)
+        engine = LlamaCppEngine(
+            request.model_path, 
+            status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+        )
         
         if request.benchmark_type == "quick":
-            results = run_quick_benchmark(engine, request)
+            results = run_quick_benchmark(engine, request, benchmark_id)
         elif request.benchmark_type == "full":
-            results = run_full_benchmark(engine, request)
+            results = run_full_benchmark(engine, request, benchmark_id)
         elif request.benchmark_type == "ai_tune":
-            results = run_ai_tune(engine, request)
+            results = run_ai_tune(engine, request, benchmark_id)
         elif request.benchmark_type == "grid_search":
-            results = run_grid_search(engine, request)
+            results = run_grid_search(engine, request, benchmark_id)
         else:
             raise ValueError(f"Unknown benchmark type: {request.benchmark_type}")
         
         # Save results
         db.update_results(benchmark_id, results, "completed")
+        _set_status(benchmark_id, "completed")
+        _emit_status(benchmark_id, "Benchmark completed successfully", "success")
         
     except Exception as e:
+        error_msg = f"Benchmark failed: {e}"
+        print(error_msg)
         db.update_status(benchmark_id, "failed", error=str(e))
+        _set_status(benchmark_id, "failed")
+        _emit_status(benchmark_id, error_msg, "error")
 
 
-def run_quick_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest) -> dict:
+def run_quick_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest, 
+                         benchmark_id: str) -> dict:
     """Run quick benchmark with single context length."""
     ctx_len = (request.context_lengths or [2048])[0]
+    
+    _set_progress(benchmark_id, 1, 1)
     
     return engine.benchmark(
         context_lengths=[ctx_len],
@@ -251,9 +397,12 @@ def run_quick_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest) -> di
     )
 
 
-def run_full_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest) -> dict:
+def run_full_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest, 
+                        benchmark_id: str) -> dict:
     """Run full benchmark across multiple context lengths."""
     ctx_lens = request.context_lengths or [512, 1024, 2048, 4096]
+    
+    _set_progress(benchmark_id, 0, len(ctx_lens))
     
     return engine.benchmark(
         context_lengths=ctx_lens,
@@ -262,7 +411,8 @@ def run_full_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest) -> dic
     )
 
 
-def run_ai_tune(engine: LlamaCppEngine, request: BenchmarkRequest) -> dict:
+def run_ai_tune(engine: LlamaCppEngine, request: BenchmarkRequest, 
+                 benchmark_id: str) -> dict:
     """Run AI-assisted tuning."""
     from tuners.ai_tuner import AITuner
     
@@ -270,7 +420,8 @@ def run_ai_tune(engine: LlamaCppEngine, request: BenchmarkRequest) -> dict:
     return tuner.run()
 
 
-def run_grid_search(engine: LlamaCppEngine, request: BenchmarkRequest) -> dict:
+def run_grid_search(engine: LlamaCppEngine, request: BenchmarkRequest, 
+                     benchmark_id: str) -> dict:
     """Run grid search optimization."""
     from tuners.grid_search import GridSearchTuner
     

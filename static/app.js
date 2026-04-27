@@ -6,6 +6,7 @@ class LLMTunerApp {
         this.currentBenchmark = null;
         this.pollInterval = null;
         this.charts = {};
+        this.eventSource = null;
         
         this.init();
     }
@@ -119,6 +120,13 @@ class LLMTunerApp {
             
             this.currentBenchmark = result.id;
             this.showResultsPanel();
+            this.clearStatusLog();
+            this.addStatusMessage('⏳ Benchmark queued...', 'info');
+            
+            // Start SSE connection for real-time updates
+            this.connectSSE(result.id);
+            
+            // Also start polling as fallback
             this.startPolling(result.id);
             
         } catch (error) {
@@ -128,6 +136,106 @@ class LLMTunerApp {
             startBtn.disabled = false;
             startBtn.textContent = 'Start Benchmark';
         }
+    }
+
+    connectSSE(benchmarkId) {
+        // Close existing connection
+        if (this.eventSource) {
+            this.eventSource.close();
+        }
+        
+        const url = `${this.apiBase}/api/benchmarks/${benchmarkId}/stream`;
+        this.eventSource = new EventSource(url);
+        
+        this.eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                
+                if (data.type === 'progress') {
+                    // Progress update
+                    this.updateProgress(data.value, data.status);
+                    
+                    if (data.status === 'completed' || data.status === 'failed') {
+                        this.eventSource.close();
+                    }
+                } else if (data.message) {
+                    // Status message
+                    const icon = this.getStatusIcon(data.level);
+                    this.addStatusMessage(`${icon} ${data.message}`, data.level);
+                    
+                    // Update status bar based on level
+                    if (data.level === 'success') {
+                        this.updateStatusBar('completed');
+                    } else if (data.level === 'error') {
+                        this.updateStatusBar('failed');
+                    }
+                }
+            } catch (e) {
+                console.error('SSE parse error:', e);
+            }
+        };
+        
+        this.eventSource.onerror = (err) => {
+            console.log('SSE connection closed');
+            this.eventSource.close();
+        };
+    }
+
+    getStatusIcon(level) {
+        switch (level) {
+            case 'success': return '✅';
+            case 'error': return '❌';
+            case 'warning': return '⚠️';
+            default: return 'ℹ️';
+        }
+    }
+
+    clearStatusLog() {
+        const log = document.getElementById('status-log');
+        if (log) {
+            log.innerHTML = '';
+        }
+    }
+
+    addStatusMessage(message, level = 'info') {
+        let log = document.getElementById('status-log');
+        
+        if (!log) {
+            // Create status log container if it doesn't exist
+            const statusBar = document.getElementById('benchmark-status');
+            log = document.createElement('div');
+            log.id = 'status-log';
+            log.className = 'status-log';
+            statusBar.parentNode.insertBefore(log, statusBar.nextSibling);
+        }
+        
+        const entry = document.createElement('div');
+        entry.className = `status-entry status-${level}`;
+        
+        // Add timestamp
+        const time = new Date().toLocaleTimeString();
+        entry.innerHTML = `<span class="status-time">[${time}]</span> ${message}`;
+        
+        log.appendChild(entry);
+        
+        // Auto-scroll to bottom
+        log.scrollTop = log.scrollHeight;
+    }
+
+    updateProgress(progress, status) {
+        const statusBar = document.getElementById('benchmark-status');
+        
+        if (progress > 0 && progress <= 100) {
+            statusBar.textContent = `🔄 Running benchmark... ${progress}% complete`;
+            
+            // Update any progress bar
+            const progressBar = document.querySelector('.progress-bar-fill');
+            if (progressBar) {
+                progressBar.style.width = `${progress}%`;
+            }
+        }
+        
+        this.updateStatusBar(status);
     }
 
     parseContextLengths() {
@@ -156,13 +264,29 @@ class LLMTunerApp {
 
             this.updateStatusBar(benchmark.status);
 
+            if (benchmark.live && benchmark.live.messages) {
+                // Update from live status
+                benchmark.live.messages.forEach(msg => {
+                    const icon = this.getStatusIcon(msg.level);
+                    this.addStatusMessage(`${icon} ${msg.message}`, msg.level);
+                });
+                
+                if (benchmark.live.progress > 0) {
+                    this.updateProgress(benchmark.live.progress, benchmark.status);
+                }
+            }
+
             if (benchmark.status === 'completed' && benchmark.results) {
                 clearInterval(this.pollInterval);
+                if (this.eventSource) this.eventSource.close();
                 this.renderResults(benchmark);
                 await this.loadHistory(); // Refresh history
             } else if (benchmark.status === 'failed') {
                 clearInterval(this.pollInterval);
-                alert(`Benchmark failed: ${benchmark.error}`);
+                if (this.eventSource) this.eventSource.close();
+                
+                const errorMsg = benchmark.error || 'Unknown error';
+                this.addStatusMessage(`❌ Benchmark failed: ${errorMsg}`, 'error');
             }
 
         } catch (error) {
@@ -172,6 +296,8 @@ class LLMTunerApp {
 
     updateStatusBar(status) {
         const statusBar = document.getElementById('benchmark-status');
+        if (!statusBar) return;
+        
         statusBar.className = `status-bar status-${status}`;
         
         switch (status) {
@@ -179,13 +305,13 @@ class LLMTunerApp {
                 statusBar.textContent = '⏳ Benchmark queued...';
                 break;
             case 'running':
-                statusBar.textContent = '🔄 Running benchmark... This may take a few minutes.';
+                statusBar.textContent = '🔄 Running benchmark... Check log below for details.';
                 break;
             case 'completed':
                 statusBar.textContent = '✅ Benchmark completed!';
                 break;
             case 'failed':
-                statusBar.textContent = '❌ Benchmark failed.';
+                statusBar.textContent = '❌ Benchmark failed. Check log for error details.';
                 break;
         }
     }
@@ -210,7 +336,7 @@ class LLMTunerApp {
         const ctx = document.getElementById('throughput-chart').getContext('2d');
         
         if (this.charts.throughput) {
-            this.charts.throughout.destroy();
+            this.charts.throughput.destroy();
         }
 
         // Handle different result formats
