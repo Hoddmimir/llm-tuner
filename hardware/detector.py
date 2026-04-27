@@ -101,22 +101,63 @@ class HardwareDetector:
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 
-                if "cards" in data and len(data["cards"]) > 0:
-                    card = data["cards"][0]
+                # Find first card (keys like "card0", "cards", etc.)
+                card = None
+                for key in data:
+                    if key.startswith("card") or key == "cards":
+                        card = data[key]
+                        break
+                
+                if not card:
+                    return {"name": "AMD GPU (unknown)", "vram_total_mb": 0, "vram_used_mb": 0}
+                
+                # Handle both formats: direct card object vs list of cards
+                if isinstance(card, list) and len(card) > 0:
+                    card = card[0]
+                
+                # Get GPU name - try multiple field names
+                gpu_name = (card.get("Device Name") or 
+                           card.get("name") or 
+                           card.get("card_serial") or 
+                           "AMD GPU")
+                
+                # Parse VRAM from system section or calculate from allocated percentage
+                vram_total_mb = 0
+                vram_used_mb = 0
+                
+                # Check for vram_usage field (newer format)
+                vram_usage = card.get("vram_usage", {})
+                if vram_usage:
+                    total_str = vram_usage.get("total", "0")
+                    used_str = vram_usage.get("used", "0")
+                    vram_total_mb = self._parse_vram(total_str)
+                    vram_used_mb = self._parse_vram(used_str)
+                
+                # If no vram_usage, try to get from system section (PID entries show VRAM usage)
+                if not vram_total_mb and "system" in data:
+                    system_data = data["system"]
+                    for key, value in system_data.items():
+                        if isinstance(value, list) and len(value) >= 3:
+                            # Format: [process_name, gpu_id, vram_bytes, ...]
+                            try:
+                                vram_bytes = int(value[2])
+                                vram_used_mb += int(vram_bytes / (1024 * 1024))
+                            except (ValueError, IndexError):
+                                pass
+                
+                # RX 7900 XTX has 24GB - use known values for common cards
+                if "7900" in gpu_name and not vram_total_mb:
+                    vram_total_mb = 24576  # 24 GB
                     
-                    # Parse VRAM (in MB or GB depending on output format)
-                    vram_usage = card.get("vram_usage", {})
-                    total_mb = self._parse_vram(vram_usage.get("total", "0"))
-                    used_mb = self._parse_vram(vram_usage.get("used", "0"))
-                    
-                    return {
-                        "name": card.get("card_serial", "AMD GPU"),
-                        "vram_total_mb": total_mb,
-                        "vram_used_mb": used_mb,
-                        "vram_free_mb": total_mb - used_mb,
-                        "temperature_c": card.get("temp", {}).get("asic_temp", 0),
-                        "power_watts": card.get("power_usage", 0)
-                    }
+                return {
+                    "name": gpu_name,
+                    "vram_total_mb": vram_total_mb,
+                    "vram_used_mb": vram_used_mb,
+                    "vram_free_mb": max(0, vram_total_mb - vram_used_mb),
+                    "temperature_c": float(card.get("Temperature (Sensor edge) (C)", 
+                                   card.get("temp", {}).get("asic_temp", 0)) or 0),
+                    "power_watts": float(card.get("Average Graphics Package Power (W)", 0) or 0)
+                }
         except Exception as e:
             print(f"Warning: Could not get ROCm GPU info: {e}")
         
