@@ -14,6 +14,7 @@ from typing import Optional
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -288,8 +289,8 @@ def serve_frontend():
     """Serve the web frontend."""
     index_path = static_dir / "index.html"
     if index_path.exists():
-        return index_path.read_text()
-    return "<h1>LLM Tuner</h1><p>Frontend not found. Run with --dev flag.</p>"
+        return HTMLResponse(content=index_path.read_text())
+    return HTMLResponse(content="<h1>LLM Tuner</h1><p>Frontend not found.</p>")
 
 
 if __name__ == "__main__":
