@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Tuner - Inference Benchmark Suite</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <h1>LLM Tuner</h1>
+            <p class="subtitle">Inference Engine Benchmark Suite</p>
+        </header>
+
+        <!-- Hardware Status Bar -->
+        <div id="hardware-bar" class="hardware-bar hidden">
+            <div class="hardware-info">
+                <span class="badge gpu-badge" id="gpu-vendor"></span>
+                <span id="gpu-name"></span>
+                <span class="separator">|</span>
+                <span id="vram-info"></span>
+                <span class="separator">|</span>
+                <span id="cpu-info"></span>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Configuration Panel -->
+            <section class="panel config-panel">
+                <h2>New Benchmark</h2>
+                
+                <form id="benchmark-form" class="config-form">
+                    <div class="form-group">
+                        <label for="model-path">Model Path</label>
+                        <input type="text" id="model-path" placeholder="/path/to/model.gguf" required>
+                    </div>
+
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="engine-select">Engine</label>
+                            <select id="engine-select"></select>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="benchmark-type">Benchmark Type</label>
+                            <select id="benchmark-type">
+                                <option value="quick">Quick (Single Context)</option>
+                                <option value="full" selected>Full (Multiple Contexts)</option>
+                                <option value="ai_tune">AI-Assisted Tuning</option>
+                                <option value="grid_search">Grid Search</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="form-row" id="context-lengths-group">
+                        <div class="form-group">
+                            <label for="context-lengths">Context Lengths (comma-separated)</label>
+                            <input type="text" id="context-lengths" value="512,1024,2048,4096">
+                        </div>
+
+                        <div class="form-group">
+                            <label for="max-tokens">Max Tokens</label>
+                            <input type="number" id="max-tokens" value="100" min="10" max="500">
+                        </div>
+                    </div>
+
+                    <div class="form-row" id="ai-tune-options hidden">
+                        <div class="form-group">
+                            <label for="tune-rounds">Tuning Rounds</label>
+                            <input type="number" id="tune-rounds" value="8" min="1" max="20">
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary" id="start-btn">
+                        Start Benchmark
+                    </button>
+                </form>
+            </section>
+
+            <!-- Results Panel -->
+            <section class="panel results-panel hidden" id="results-panel">
+                <h2>Results</h2>
+                
+                <div id="benchmark-status" class="status-bar"></div>
+
+                <!-- Charts Container -->
+                <div class="charts-container">
+                    <div class="chart-card">
+                        <h3>Throughput by Context Length</h3>
+                        <canvas id="throughput-chart"></canvas>
+                    </div>
+
+                    <div class="chart-card" id="comparison-chart-card hidden">
+                        <h3>Engine Comparison</h3>
+                        <canvas id="comparison-chart"></canvas>
+                    </div>
+
+                    <div class="chart-card" id="ai-tune-chart-card hidden">
+                        <h3>AI Tuning Progress</h3>
+                        <canvas id="ai-tune-chart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Results Table -->
+                <div class="results-table-container">
+                    <table id="results-table" class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Metric</th>
+                                <th>Value</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <!-- History Panel -->
+            <section class="panel history-panel">
+                <h2>Benchmark History</h2>
+                
+                <div id="history-list" class="history-list"></div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
