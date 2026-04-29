@@ -195,64 +195,53 @@ def _get_gpu_memory() -> dict:
 def _parse_rocm_smi_text(output: str) -> dict:
     """Parse rocm-smi text output for GPU stats.
     
-    Handles various ROCm versions and formats.
+    Handles multiple ROCm versions and formats including:
+    - "GPU Memory Allocated (VRAM%): 95" (ROCm 4.x+)
+    - "Vram Usage : card-0 20534 / 24576 MB (83%)" (older)
     """
+    import re as _re
     used_mb = 0.0
     total_mb = 24576.0  # Default for RX 7900 XTX
     gpu_util = 0.0
     gpu_name = "Unknown"
 
-    lines = output.split("\n")
+    lines_list = output.split("\n")
     
-    for line in lines:
+    for line in lines_list:
         stripped = line.strip()
         
-        # GPU name - look for "Device Name:" or similar
+        # GPU name
         if "Device Name" in stripped and ":" in stripped:
             parts = stripped.split(":", 1)
             gpu_name = parts[1].strip() if len(parts) > 1 else "Unknown"
         
-        # VRAM usage patterns:
-        # "Vram Usage              : card-0    20534 / 24576 MB (83%)"
-        # "VRAM Usage              : 20534 / 24576 MB"
-        if ("vram usage" in stripped.lower() or "vram" in stripped.lower()) and "/" in stripped:
+        # VRAM - ROCm 4.x+ format: "GPU Memory Allocated (VRAM%): 95"
+        vram_match = _re.search(r"GPU Memory Allocated.*?:\s*(\d+)", stripped)
+        if vram_match:
+            pct = float(vram_match.group(1))
+            used_mb = total_mb * pct / 100.0
+            continue
+        
+        # VRAM - older format with slash: "20534 / 24576 MB"
+        if ("vram usage" in stripped.lower()) and "/" in stripped:
             try:
-                # Extract numbers around the slash
-                parts = stripped.split("/")
-                if len(parts) >= 2:
-                    # Find all numbers in the line
-                    nums = []
-                    for word in stripped.replace(",", "").split():
-                        try:
-                            val = float(word)
-                            nums.append(val)
-                        except ValueError:
-                            pass
-                    
-                    if len(nums) >= 2:
-                        used_mb = nums[0]
-                        total_mb = nums[1]
+                nums = []
+                for word in stripped.replace(",", "").split():
+                    try:
+                        val = float(word)
+                        nums.append(val)
+                    except ValueError:
+                        pass
+                if len(nums) >= 2:
+                    used_mb = nums[0]
+                    total_mb = nums[1]
             except (ValueError, IndexError):
                 pass
         
-        # GPU utilization patterns:
-        # "Gpu use%                : card-0    45.3%"
-        # "GPU Core Clk Percent" or similar
-        if ("gpu use" in stripped.lower() or "gpu usage" in stripped.lower() or 
-            "core clk percent" in stripped.lower()) and "%" in stripped:
-            try:
-                nums = []
-                for word in stripped.replace("%", "").replace(",", "").split():
-                    try:
-                        val = float(word)
-                        if 0 <= val <= 100:
-                            nums.append(val)
-                    except ValueError:
-                        pass
-                if nums:
-                    gpu_util = nums[0]
-            except (ValueError, IndexError):
-                pass
+        # GPU utilization - "GPU Memory Read/Write Activity (%): 2"
+        util_match = _re.search(r"(?:Read/Write Activity|Gpu use).*?:\s*(\d+)", stripped)
+        if util_match:
+            gpu_util = float(util_match.group(1))
 
     return {
         "gpu_memory_used_mb": round(used_mb, 1),
