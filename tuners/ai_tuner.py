@@ -6,20 +6,24 @@ import time
 import requests
 from pathlib import Path
 
-from engines.llama_cpp import LlamaCppEngine
+from engines.llama_cpp import LlamaCppEngine, find_available_port, get_available_vram_mb
 from tuners.base import BaseTuner
 
 
 class AITuner(BaseTuner):
     """Model-as-optimizer: let the model propose its own optimal flags."""
 
-    def __init__(self, model_path: str, port: int = 8081, rounds: int = 8, status_callback=None):
+    def __init__(self, model_path: str, port: int = None, rounds: int = 8, status_callback=None):
+        # Use dynamic ports to avoid conflicts
+        if port is None:
+            port = find_available_port()
         super().__init__(model_path, port)
         self.rounds = rounds
         self.engine = LlamaCppEngine(model_path, port, status_callback=status_callback)
         self.history = []
         self.status_callback = status_callback
-        self.ai_query_port = 8082
+        # AI query server gets its own dynamic port
+        self.ai_query_port = find_available_port(start=port + 10)
 
     def _log(self, msg, level="info"):
         print("[AI-TUNE] [{}] {}".format(level.upper(), msg))
@@ -40,6 +44,15 @@ class AITuner(BaseTuner):
         if model_info:
             self._log("Model info: params={}, layers={}".format(
                 model_info.get('params', '?'), model_info.get('layers', '?')), "info")
+
+        # Check VRAM before starting AI server
+        available_vram = get_available_vram_mb()
+        self._log("Available VRAM for AI queries: {:.0f} MB".format(available_vram), "info")
+        
+        if available_vram < 1024:
+            self._log("Insufficient VRAM ({:.0f} MB) for AI query server. Using heuristic fallback.".format(
+                available_vram), "warning")
+            return self._run_heuristic_fallback(hw_profile, model_info)
 
         # Start persistent llama-server for AI queries on separate port
         self._log("Starting persistent llama-server on port {} for AI queries...".format(self.ai_query_port), "info")
@@ -251,13 +264,22 @@ class AITuner(BaseTuner):
             if result.returncode == 0:
                 output = result.stdout
                 
-                # Parse GPU name
+                # Parse GPU name and VRAM
+                import re as _re
                 for line in output.split("\n"):
                     if "Device Name" in line and ":" in line:
                         parts = line.split(":", 1)
                         hw["gpu"] = parts[1].strip() if len(parts) > 1 else "Unknown"
                     
-                    # Parse VRAM total
+                    # ROCm 4.x+ format: "GPU Memory Allocated (VRAM%): 95"
+                    m = _re.search(r'GPU Memory Allocated.*?:\s*(\d+)', line)
+                    if m:
+                        used_pct = float(m.group(1))
+                        total_mb = 24576.0  # RX 7900 XTX default
+                        hw["vram_total"] = "{} MB".format(int(total_mb))
+                        continue
+                    
+                    # Older format with slash
                     if ("vram usage" in line.lower()) and "/" in line:
                         try:
                             nums = []

@@ -3,6 +3,7 @@
 
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -13,12 +14,58 @@ from typing import Optional, Callable
 from engines.base import BaseEngine
 
 
+def find_available_port(start=8081, max_attempts=20):
+    """Find an available TCP port."""
+    for port in range(start, start + max_attempts):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(('localhost', port))
+                return port
+        except OSError:
+            continue
+    raise OSError(f"No available port found in range {start}-{start+max_attempts}")
+
+
+def get_available_vram_mb() -> float:
+    """Get available VRAM in MB from rocm-smi."""
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "-a"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            import re as _re
+            for line in result.stdout.split("\n"):
+                # ROCm 4.x+ format: "GPU Memory Allocated (VRAM%): 95"
+                m = _re.search(r'GPU Memory Allocated.*?:\s*(\d+)', line)
+                if m:
+                    used_pct = float(m.group(1))
+                    total_mb = 24576.0  # RX 7900 XTX
+                    return total_mb * (100 - used_pct) / 100.0
+                # Older format with slash
+                if "vram usage" in line.lower() and "/" in line:
+                    nums = []
+                    for word in line.replace(",", "").split():
+                        try:
+                            nums.append(float(word))
+                        except ValueError:
+                            pass
+                    if len(nums) >= 2:
+                        return nums[1] - nums[0]
+    except Exception:
+        pass
+    return 0.0
+
+
 class LlamaCppEngine(BaseEngine):
     """Backend for llama.cpp inference server with ROCm/HIP support."""
     
-    def __init__(self, model_path: str, port: int = 8081, 
+    def __init__(self, model_path: str, port: int = None, 
                  server_binary: str = None, status_callback: Callable = None,
                  benchmark_id: str = None):
+        # Use dynamic port if not specified
+        if port is None:
+            port = find_available_port()
         super().__init__(model_path, port)
         self.server_binary = server_binary or self._find_server()
         self.process = None
@@ -74,6 +121,13 @@ class LlamaCppEngine(BaseEngine):
     
     def start_server(self, **kwargs) -> bool:
         """Start llama.cpp server with specified flags."""
+        # Check VRAM availability before starting
+        available_vram = get_available_vram_mb()
+        self._log(f"Available VRAM: {available_vram:.0f} MB", "info")
+        
+        if available_vram < 512:
+            self._log(f"WARNING: Only {available_vram:.0f} MB VRAM free. Server may fall back to CPU or fail.", "warning")
+        
         self._log(f"Starting llama.cpp server on port {self.port}")
         
         cmd = [
@@ -382,6 +436,7 @@ class LlamaCppEngine(BaseEngine):
     
     def get_memory_usage(self) -> dict:
         """Get current VRAM usage."""
+        import re
         try:
             result = subprocess.run(
                 ["rocm-smi", "-a"],
@@ -389,20 +444,35 @@ class LlamaCppEngine(BaseEngine):
             )
             
             if result.returncode == 0:
-                # Parse text output for VRAM info
+                total_mb = 24576.0  # Default for RX 7900 XTX
+                used_mb = 0.0
+                
                 for line in result.stdout.split("\n"):
-                    if "Vram Usage" in line or "VRAM Usage" in line:
-                        parts = line.replace(":", "").replace("%", "").split()
-                        try:
-                            used_mb = float(parts[1])
-                            total_mb = float(parts[2])
-                            return {
-                                "vram_used_mb": used_mb,
-                                "vram_total_mb": total_mb,
-                                "vram_pct": round(used_mb / total_mb * 100, 1) if total_mb > 0 else 0
-                            }
-                        except (ValueError, IndexError):
-                            pass
+                    # ROCm 4.x+ format: "GPU Memory Allocated (VRAM%): 95"
+                    m = re.search(r'GPU Memory Allocated.*?:\s*(\d+)', line)
+                    if m:
+                        used_pct = float(m.group(1))
+                        used_mb = total_mb * used_pct / 100.0
+                        break
+                    
+                    # Older format with slash
+                    if ("vram usage" in line.lower()) and "/" in line:
+                        nums = []
+                        for word in line.replace(",", "").split():
+                            try:
+                                nums.append(float(word))
+                            except ValueError:
+                                pass
+                        if len(nums) >= 2:
+                            used_mb = nums[0]
+                            total_mb = nums[1]
+                            break
+                
+                return {
+                    "vram_used_mb": round(used_mb, 1),
+                    "vram_total_mb": round(total_mb, 1),
+                    "vram_pct": round(used_mb / total_mb * 100, 1) if total_mb > 0 else 0
+                }
         except Exception as e:
             self._log(f"Error getting memory usage: {e}", "warning")
         

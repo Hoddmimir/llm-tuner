@@ -2,14 +2,17 @@
 """Grid search tuner - systematic parameter space exploration."""
 
 import itertools
-from engines.llama_cpp import LlamaCppEngine
+from engines.llama_cpp import LlamaCppEngine, find_available_port
 from tuners.base import BaseTuner
 
 
 class GridSearchTuner(BaseTuner):
     """Systematic grid search over parameter space."""
     
-    def __init__(self, model_path: str, port: int = 8081, status_callback=None):
+    def __init__(self, model_path: str, port: int = None, status_callback=None):
+        # Use dynamic port to avoid conflicts with other benchmarks
+        if port is None:
+            port = find_available_port()
         super().__init__(model_path, port)
         self.engine = LlamaCppEngine(model_path, port, status_callback=status_callback)
         self.results = []
