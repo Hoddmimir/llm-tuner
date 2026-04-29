@@ -14,6 +14,17 @@
     --error-red: #ef4444;
 }
 
+[data-theme="dark"] {
+    --bg-primary: #111111;
+    --bg-secondary: #1a1a1a;
+    --bg-card: #1e1e1e;
+    --text-primary: #e5e5e5;
+    --text-secondary: #9ca3af;
+    --border-color: #333333;
+    --accent-blue: #60a5fa;
+    --accent-cyan: #22d3ee;
+}
+
 * {
     margin: 0;
     padding: 0;
@@ -22,7 +33,7 @@
 
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    background: linear-gradient(180deg, #f5f5f5 0%, #fafafa 100%);
+    background: linear-gradient(180deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
     color: var(--text-primary);
     line-height: 1.6;
 }
@@ -128,7 +139,8 @@ input, select {
     border: 1px solid var(--border-color);
     border-radius: 6px;
     font-size: 1rem;
-    background: white;
+    background: var(--bg-card);
+    color: var(--text-primary);
     transition: border-color 0.2s;
 }
 
@@ -161,6 +173,245 @@ input:focus, select:focus {
     color: white;
 }
 
+.btn-secondary {
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+}
+
+.btn-secondary:hover {
+    background: var(--border-color);
+}
+
+/* Header Settings Button */
+.app-header {
+    position: relative;
+}
+
+.btn-settings {
+    position: absolute;
+    top: 0.5rem;
+    right: 0;
+    background: none;
+    border: none;
+    font-size: 1.5rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    transition: transform 0.3s, color 0.2s;
+    padding: 0.25rem;
+}
+
+.btn-settings:hover {
+    color: var(--text-primary);
+    transform: rotate(45deg);
+}
+
+/* Modal */
+.modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] .modal-backdrop {
+    background: rgba(0, 0, 0, 0.7);
+}
+
+.modal-content {
+    position: relative;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    padding: 0;
+    width: 90%;
+    max-width: 500px;
+    max-height: 80vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+}
+
+[data-theme="dark"] .modal-content {
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+}
+
+.modal-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1.5rem 2rem;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.modal-header h2 {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 500;
+}
+
+.btn-close {
+    background: none;
+    border: none;
+    font-size: 1.75rem;
+    cursor: pointer;
+    color: var(--text-secondary);
+    line-height: 1;
+    padding: 0 0.25rem;
+}
+
+.btn-close:hover {
+    color: var(--text-primary);
+}
+
+.modal-body {
+    padding: 2rem;
+}
+
+/* Settings Groups */
+.settings-group {
+    margin-bottom: 1.5rem;
+}
+
+.settings-group:last-child {
+    margin-bottom: 0;
+}
+
+.settings-group label {
+    display: block;
+    margin-bottom: 0.75rem;
+}
+
+/* Theme Toggle */
+.theme-toggle {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.theme-btn {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    border: 2px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 0.95rem;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.theme-btn:hover {
+    border-color: var(--accent-blue);
+    color: var(--text-primary);
+}
+
+.theme-btn.active {
+    border-color: var(--accent-blue);
+    background: rgba(59, 130, 246, 0.1);
+    color: var(--accent-blue);
+    font-weight: 600;
+}
+
+[data-theme="dark"] .theme-btn.active {
+    background: rgba(96, 165, 250, 0.1);
+}
+
+/* Directory Input Row */
+.dir-input-row {
+    display: flex;
+    gap: 0.75rem;
+}
+
+.dir-input-row input {
+    flex: 1;
+}
+
+.use-model-btn {
+    margin-top: 0.75rem;
+    width: 100%;
+}
+
+/* Model Dropdown in Form */
+#model-dropdown {
+    margin-top: 0.5rem;
+    font-family: monospace;
+    font-size: 0.85rem;
+}
+
+/* Dark mode overrides for status log */
+[data-theme="dark"] .status-log {
+    background: #0d1117;
+    border: 1px solid var(--border-color);
+}
+
+/* Dark mode overrides for chart cards */
+[data-theme="dark"] .chart-card {
+    background: var(--bg-secondary);
+}
+
+/* Dark mode status bar colors */
+[data-theme="dark"] .status-pending {
+    background: rgba(245, 158, 11, 0.15);
+}
+
+[data-theme="dark"] .status-running {
+    background: rgba(96, 165, 250, 0.15);
+}
+
+[data-theme="dark"] .status-completed {
+    background: rgba(16, 185, 129, 0.15);
+}
+
+[data-theme="dark"] .status-failed {
+    background: rgba(239, 68, 68, 0.15);
+}
+
+/* Memory Display */
+.memory-display {
+    display: flex;
+    gap: 2rem;
+    padding: 0.75rem 1rem;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    margin-bottom: 1rem;
+}
+
+.memory-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.memory-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.memory-value {
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+}
+
+.memory-total {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
 /* Status Bar */
 .status-bar {
     padding: 1rem;
@@ -190,6 +441,31 @@ input:focus, select:focus {
 }
 
 /* Charts */
+.charts-container {
+    display: grid;
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.chart-card {
+    background: var(--bg-secondary);
+    border-radius: 8px;
+    padding: 1.25rem;
+    border: 1px solid var(--border-color);
+}
+
+.chart-card h3 {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 1rem;
+}
+
+canvas {
+    max-height: 300px;
+}
 .charts-container {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
@@ -334,6 +610,292 @@ canvas {
 /* Utilities */
 .hidden {
     display: none !important;
+}
+
+.monitor-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.monitor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.monitor-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.gpu-stats-row {
+    display: flex;
+    gap: 2rem;
+    align-items: center;
+    padding: 0.5rem 0;
+}
+
+.gpu-stat-item {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.gpu-graph {
+    width: 100%;
+    height: 80px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+}
+
+.monitor-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.monitor-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.monitor-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+/* Terminal Log */
+.terminal-log {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border-radius: 6px;
+    padding: 1rem;
+    max-height: 250px;
+    min-height: 80px;
+    overflow-y: auto;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+.log-entry {
+    padding: 0.15rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.log-time {
+    color: #6b7280;
+    font-size: 0.75rem;
+    margin-right: 0.5rem;
+}
+
+.log-msg {
+    color: #e0e0e0;
+}
+
+.log-entry.log-info .log-msg {
+    color: #93c5fd;
+}
+
+.log-entry.log-success .log-msg {
+    color: #6ee7b7;
+}
+
+.log-entry.log-warning .log-msg {
+    color: #fbbf24;
+}
+
+.log-entry.log-error .log-msg {
+    color: #fca5a5;
+}
+
+/* Benchmark Controls */
+.benchmark-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+
+.benchmark-controls .status-bar {
+    margin-bottom: 0;
+    flex: 1;
+}
+
+/* Bench Description */
+.bench-description {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+    line-height: 1.4;
+    font-style: italic;
+}
+
+.help-text {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.2rem;
+}
+
+/* Monitor Panel - Always Visible */
+.monitor-panel {
+    position: sticky;
+    top: 1rem;
+    z-index: 100;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 1.5rem;
+    margin-bottom: 2rem;
+}
+
+.monitor-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+}
+
+.monitor-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+}
+
+.monitor-title {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.gpu-stats-row {
+    display: flex;
+    gap: 2rem;
+    align-items: center;
+    padding: 0.5rem 0;
+}
+
+.gpu-stat-item {
+    display: flex;
+    gap: 0.4rem;
+    align-items: center;
+}
+
+.gpu-graph {
+    width: 100%;
+    height: 80px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+}
+
+.monitor-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.monitor-progress-bar {
+    width: 100%;
+    height: 4px;
+    background: var(--border-color);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.monitor-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan));
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+/* Terminal Log */
+.terminal-log {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    border-radius: 6px;
+    padding: 1rem;
+    max-height: 250px;
+    min-height: 80px;
+    overflow-y: auto;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+.log-entry {
+    padding: 0.15rem 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+}
+
+.log-time {
+    color: #6b7280;
+    font-size: 0.75rem;
+    margin-right: 0.5rem;
+}
+
+.log-msg {
+    color: #e0e0e0;
+}
+
+.log-entry.log-info .log-msg {
+    color: #93c5fd;
+}
+
+.log-entry.log-success .log-msg {
+    color: #6ee7b7;
+}
+
+.log-entry.log-warning .log-msg {
+    color: #fbbf24;
+}
+
+.log-entry.log-error .log-msg {
+    color: #fca5a5;
+}
+
+/* Benchmark Controls */
+.benchmark-controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    margin-top: 0.5rem;
+}
+
+.benchmark-controls .status-bar {
+    margin-bottom: 0;
+    flex: 1;
+}
+
+/* Bench Description */
+.bench-description {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    margin-top: 0.25rem;
+    line-height: 1.4;
+    font-style: italic;
+}
+
+.help-text {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    margin-top: 0.2rem;
 }
 
 @media (max-width: 768px) {

@@ -4,6 +4,7 @@
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -12,7 +13,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
-from threading import Lock
+from threading import Lock, Thread
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -38,6 +39,7 @@ class BenchmarkRequest(BaseModel):
     max_tokens: int = 100
     temperature: float = 0.7
     rounds: int = 8  # for AI tune
+    custom_flags: str = ""  # extra engine flags
 
 
 class BenchmarkResult(BaseModel):
@@ -56,20 +58,44 @@ class BenchmarkResult(BaseModel):
 
 db: DatabaseManager | None = None
 hardware_cache: dict | None = None
+settings_path: Path | None = None
 
 # Real-time status tracking
 benchmark_statuses: dict[str, dict] = {}  # id -> {status, messages, progress}
 statuses_lock = Lock()
 
+# Cancellation tracking
+cancel_requests: dict[str, bool] = {}  # id -> cancelled flag
+gpu_poll_threads: dict[str, Thread] = {}  # id -> GPU polling thread
+
+
+def _get_settings() -> dict:
+    """Load settings from JSON file."""
+    if not settings_path or not settings_path.exists():
+        return {"models_directory": "", "theme": "light"}
+    try:
+        return json.loads(settings_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"models_directory": "", "theme": "light"}
+
+
+def _save_settings(settings: dict):
+    """Save settings to JSON file."""
+    if settings_path:
+        settings_path.write_text(json.dumps(settings, indent=2))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global db, hardware_cache
+    global db, hardware_cache, settings_path
     
     # Initialize database
     db = DatabaseManager()
     db.init()
+    
+    # Settings file next to the app
+    settings_path = Path(__file__).parent / "settings.json"
     
     # Detect hardware on startup
     detector = HardwareDetector()
@@ -129,6 +155,78 @@ def _set_status(benchmark_id: str, status: str):
             benchmark_statuses[benchmark_id]["status"] = status
 
 
+def _get_gpu_memory() -> dict:
+    """Query GPU memory usage via rocm-smi."""
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "-a", "--json"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            cards = data.get("cards", [])
+            if cards:
+                card = cards[0]
+                vram_usage = card.get("vram_usage", {})
+                used_mb = float(vram_usage.get("used", "0") or "0")
+                total_mb = float(vram_usage.get("total", "0") or "0")
+                
+                # Also get GPU utilization
+                gpu_util = float(card.get("gpu_usage", {}).get("gpu_core_clk_percent", "0") or "0")
+                
+                return {
+                    "gpu_memory_used_mb": round(used_mb, 1),
+                    "gpu_memory_total_mb": round(total_mb, 1),
+                    "gpu_utilization_pct": round(gpu_util, 1)
+                }
+    except Exception:
+        pass
+    
+    # Fallback - try text parsing
+    try:
+        result = subprocess.run(
+            ["rocm-smi", "-a"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            output = result.stdout
+            used_mb = 0.0
+            total_mb = 24576.0  # Default for RX 7900 XTX
+            
+            for line in output.split("\n"):
+                if "Vram Usage" in line or "VRAM Usage" in line:
+                    parts = line.replace(":", "").replace("%", "").split()
+                    try:
+                        used_mb = float(parts[1]) * total_mb / 100
+                    except (ValueError, IndexError):
+                        pass
+            
+            return {
+                "gpu_memory_used_mb": round(used_mb, 1),
+                "gpu_memory_total_mb": round(total_mb, 1)
+            }
+    except Exception:
+        pass
+    
+    return {"gpu_memory_used_mb": 0, "gpu_memory_total_mb": 24576}
+
+
+def _poll_gpu_memory(benchmark_id: str):
+    """Background thread that polls GPU memory every 2 seconds."""
+    while not cancel_requests.get(benchmark_id, False):
+        mem = _get_gpu_memory()
+        
+        # Emit as status message with type marker for frontend
+        with statuses_lock:
+            if benchmark_id in benchmark_statuses:
+                benchmark_statuses[benchmark_id]["gpu"] = {
+                    **mem,
+                    "timestamp": time.time()
+                }
+        
+        time.sleep(2)
+
+
 # --- SSE Endpoint ---
 
 @app.get("/api/benchmarks/{benchmark_id}/stream")
@@ -150,15 +248,26 @@ async def stream_status(benchmark_id: str):
                     yield f"data: {json.dumps(msg)}\n\n"
                 last_count = current_count
             
-            # Send progress updates
+            # Send progress updates with GPU memory data
             progress = status_data.get("progress", 0)
             status = status_data.get("status", "pending")
+            gpu_data = status_data.get("gpu", {})
             
             if progress > 0 or status in ("completed", "failed"):
-                yield f"data: {json.dumps({'type': 'progress', 'value': progress, 'status': status})}\n\n"
+                progress_msg = {
+                    'type': 'progress', 
+                    'value': progress, 
+                    'status': status
+                }
+                # Include GPU memory data if available
+                if gpu_data:
+                    progress_msg['gpu_memory_used_mb'] = gpu_data.get('gpu_memory_used_mb', 0)
+                    progress_msg['gpu_memory_total_mb'] = gpu_data.get('gpu_memory_total_mb', 24576)
+                    progress_msg['current_context'] = f"{status_data.get('current_step', 0)}/{status_data.get('total_steps', '?')}"
+                yield f"data: {json.dumps(progress_msg)}\n\n"
             
             # Check if benchmark is done
-            if status in ("completed", "failed"):
+            if status in ("completed", "failed", "cancelled"):
                 break
             
             await asyncio.sleep(0.5)
@@ -180,6 +289,12 @@ async def stream_status(benchmark_id: str):
 def get_hardware():
     """Get detected hardware profile."""
     return hardware_cache or {}
+
+
+@app.get("/api/gpu")
+def get_gpu_status():
+    """Get current GPU memory and utilization stats."""
+    return _get_gpu_memory()
 
 
 @app.get("/api/engines")
@@ -225,6 +340,8 @@ async def start_benchmark(request: BenchmarkRequest, background_tasks: Backgroun
     
     _emit_status(benchmark_id, f"Starting benchmark: {request.benchmark_type}", "info")
     _emit_status(benchmark_id, f"Model: {Path(request.model_path).name}", "info")
+    if request.custom_flags.strip():
+        _emit_status(benchmark_id, f"Custom flags: {request.custom_flags}", "info")
     
     # Create database record
     record = {
@@ -308,6 +425,28 @@ def delete_benchmark(benchmark_id: str):
     return {"deleted": True}
 
 
+@app.post("/api/benchmarks/{benchmark_id}/cancel")
+def cancel_benchmark(benchmark_id: str):
+    """Cancel a running benchmark."""
+    with statuses_lock:
+        status_data = benchmark_statuses.get(benchmark_id, {})
+    
+    if not status_data:
+        raise HTTPException(status_code=404, detail="Benchmark not found")
+    
+    current_status = status_data.get("status", "unknown")
+    if current_status in ("completed", "failed", "cancelled"):
+        return {"cancelled": False, "message": f"Benchmark already {current_status}"}
+    
+    # Set cancellation flag - will be picked up by the running thread
+    cancel_requests[benchmark_id] = True
+    
+    _emit_status(benchmark_id, "Cancellation requested...", "warning")
+    _set_status(benchmark_id, "cancelled")
+    
+    return {"cancelled": True, "message": "Benchmark cancellation in progress"}
+
+
 @app.get("/api/compare")
 def compare_benchmarks(ids: str):
     """Compare multiple benchmark results."""
@@ -323,6 +462,61 @@ def compare_benchmarks(ids: str):
         "benchmarks": benchmarks,
         "comparison": generate_comparison(benchmarks)
     }
+
+
+# --- Settings API ---
+
+class SettingsUpdate(BaseModel):
+    models_directory: str = ""
+    theme: str = "light"
+
+
+@app.get("/api/settings")
+def get_settings():
+    """Get application settings."""
+    return _get_settings()
+
+
+@app.put("/api/settings")
+def update_settings(settings: SettingsUpdate):
+    """Update application settings."""
+    current = _get_settings()
+    current["models_directory"] = settings.models_directory
+    current["theme"] = settings.theme
+    _save_settings(current)
+    return current
+
+
+# --- Model Discovery API ---
+
+@app.get("/api/models")
+def list_models():
+    """Scan models directory for .gguf files."""
+    settings = _get_settings()
+    models_dir = settings.get("models_directory", "")
+    
+    if not models_dir:
+        return {"models": [], "directory": ""}
+    
+    dir_path = Path(models_dir)
+    if not dir_path.is_dir():
+        return {"models": [], "directory": models_dir, "error": "Directory not found"}
+    
+    # Recursively find all .gguf files
+    models = []
+    for gguf_file in dir_path.rglob("*.gguf"):
+        stat = gguf_file.stat()
+        models.append({
+            "path": str(gguf_file),
+            "name": gguf_file.name,
+            "relative": str(gguf_file.relative_to(dir_path)),
+            "size_mb": round(stat.st_size / (1024 * 1024), 1)
+        })
+    
+    # Sort by name
+    models.sort(key=lambda m: m["name"].lower())
+    
+    return {"models": models, "directory": models_dir}
 
 
 def generate_comparison(benchmarks: list[dict]) -> dict:
@@ -349,6 +543,11 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
     """Run benchmark in background thread."""
     from engines.llama_cpp import LlamaCppEngine
     
+    # Start GPU memory polling thread
+    gpu_thread = Thread(target=_poll_gpu_memory, args=(benchmark_id,), daemon=True)
+    gpu_thread.start()
+    gpu_poll_threads[benchmark_id] = gpu_thread
+    
     try:
         # Update status to running
         db.update_status(benchmark_id, "running")
@@ -359,16 +558,24 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
             status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
         )
         
+        # Check for cancellation before starting
+        if cancel_requests.get(benchmark_id):
+            raise Exception("Benchmark cancelled by user")
+        
         if request.benchmark_type == "quick":
             results = run_quick_benchmark(engine, request, benchmark_id)
         elif request.benchmark_type == "full":
             results = run_full_benchmark(engine, request, benchmark_id)
         elif request.benchmark_type == "ai_tune":
-            results = run_ai_tune(engine, request, benchmark_id)
+            results = run_ai_tune(benchmark_id, request)
         elif request.benchmark_type == "grid_search":
-            results = run_grid_search(engine, request, benchmark_id)
+            results = run_grid_search(benchmark_id, request)
         else:
             raise ValueError(f"Unknown benchmark type: {request.benchmark_type}")
+        
+        # Check for cancellation after running
+        if cancel_requests.get(benchmark_id):
+            raise Exception("Benchmark cancelled by user")
         
         # Save results
         db.update_results(benchmark_id, results, "completed")
@@ -378,9 +585,13 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
     except Exception as e:
         error_msg = f"Benchmark failed: {e}"
         print(error_msg)
-        db.update_status(benchmark_id, "failed", error=str(e))
-        _set_status(benchmark_id, "failed")
-        _emit_status(benchmark_id, error_msg, "error")
+        db.update_status(benchmark_id, "failed" if "cancelled" not in str(e).lower() else "cancelled", error=str(e))
+        _set_status(benchmark_id, "failed" if "cancelled" not in str(e).lower() else "cancelled")
+        _emit_status(benchmark_id, error_msg, "error" if "cancelled" not in str(e).lower() else "warning")
+    finally:
+        # Stop GPU polling
+        cancel_requests[benchmark_id] = True
+        gpu_poll_threads.pop(benchmark_id, None)
 
 
 def run_quick_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest, 
@@ -411,21 +622,32 @@ def run_full_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest,
     )
 
 
-def run_ai_tune(engine: LlamaCppEngine, request: BenchmarkRequest, 
-                 benchmark_id: str) -> dict:
+def run_ai_tune(benchmark_id: str, request: BenchmarkRequest) -> dict:
     """Run AI-assisted tuning."""
     from tuners.ai_tuner import AITuner
     
-    tuner = AITuner(request.model_path, rounds=request.rounds)
+    if cancel_requests.get(benchmark_id):
+        raise Exception("Benchmark cancelled by user")
+    
+    tuner = AITuner(
+        request.model_path, 
+        rounds=request.rounds,
+        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+    )
     return tuner.run()
 
 
-def run_grid_search(engine: LlamaCppEngine, request: BenchmarkRequest, 
-                     benchmark_id: str) -> dict:
+def run_grid_search(benchmark_id: str, request: BenchmarkRequest) -> dict:
     """Run grid search optimization."""
     from tuners.grid_search import GridSearchTuner
     
-    tuner = GridSearchTuner(request.model_path)
+    if cancel_requests.get(benchmark_id):
+        raise Exception("Benchmark cancelled by user")
+    
+    tuner = GridSearchTuner(
+        request.model_path,
+        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+    )
     return tuner.run()
 
 

@@ -4,6 +4,7 @@
 import json
 import os
 import subprocess
+import threading
 import time
 import requests
 from pathlib import Path
@@ -87,11 +88,15 @@ class LlamaCppEngine(BaseEngine):
             cmd.extend(["--cache-type-k", kwargs["cache_type"]])
         
         if kwargs.get("flash_attn"):
-            cmd.append("--flash-attn")
-        
-        if kwargs.get("mlock"):
-            cmd.append("--mlock")
-        
+            fa_val = kwargs["flash_attn"]
+            # Handle both boolean and string values from AI suggestions
+            if isinstance(fa_val, bool) or str(fa_val).lower() in ("on", "true", "auto"):
+                cmd.extend(["--flash-attn", "on"])
+
+        # Note: --mlock is NOT valid for llama-server (only for llama-bench/llama-quantize)
+        # Silently ignore unsupported flags from AI suggestions
+        # Supported flags: --threads, --batch-size, --cache-type-k, --flash-attn, --ctx-size, --tensor-split
+
         self._log(f"Command: {' '.join(cmd[:5])}...")
         
         try:
@@ -102,6 +107,21 @@ class LlamaCppEngine(BaseEngine):
                 text=True,
                 bufsize=1
             )
+            
+            # Stream server output in real-time via a background thread
+            def stream_output():
+                try:
+                    for line in self.process.stdout:
+                        line = line.strip()
+                        if line:
+                            # Only log interesting lines to avoid spam
+                            if any(kw in line.lower() for kw in ['load', 'error', 'warn', 'ggml', 'tensor', 'compute', 'speculative', 'kv cache', 'logits']):
+                                self._log(f"[server] {line}", "info")
+                except Exception as e:
+                    self._log(f"Output stream error: {e}", "warning")
+            
+            output_thread = threading.Thread(target=stream_output, daemon=True)
+            output_thread.start()
             
             # Wait for server to be ready with progress feedback
             max_wait = 90

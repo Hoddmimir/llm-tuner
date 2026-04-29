@@ -13,7 +13,47 @@
         <header class="app-header">
             <h1>LLM Tuner</h1>
             <p class="subtitle">Inference Engine Benchmark Suite</p>
+            <button id="settings-btn" class="btn-settings" title="Settings">&#9881;</button>
         </header>
+
+        <!-- Settings Modal -->
+        <div id="settings-modal" class="modal hidden">
+            <div class="modal-backdrop" id="modal-backdrop"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>Settings</h2>
+                    <button id="close-settings" class="btn-close" title="Close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <!-- Theme Toggle -->
+                    <div class="settings-group">
+                        <label>Theme</label>
+                        <div class="theme-toggle">
+                            <button id="theme-light" class="theme-btn active" data-theme="light">&#9728; Light</button>
+                            <button id="theme-dark" class="theme-btn" data-theme="dark">&#9790; Dark</button>
+                        </div>
+                    </div>
+
+                    <!-- Models Directory -->
+                    <div class="settings-group">
+                        <label for="models-dir">Models Directory</label>
+                        <div class="dir-input-row">
+                            <input type="text" id="models-dir" placeholder="/path/to/models">
+                            <button id="scan-models-btn" class="btn btn-secondary">Scan</button>
+                        </div>
+                    </div>
+
+                    <!-- Model Select (shown after scan) -->
+                    <div class="settings-group hidden" id="model-select-group">
+                        <label for="model-select">Select Model</label>
+                        <select id="model-select" size="8">
+                            <option value="">-- No models found --</option>
+                        </select>
+                        <button id="use-model-btn" class="btn btn-secondary use-model-btn">Use Selected Model</button>
+                    </div>
+                </div>
+            </div>
+        </div>
 
         <!-- Hardware Status Bar -->
         <div id="hardware-bar" class="hardware-bar hidden">
@@ -37,6 +77,7 @@
                     <div class="form-group">
                         <label for="model-path">Model Path</label>
                         <input type="text" id="model-path" placeholder="/path/to/model.gguf" required>
+                        <select id="model-dropdown" class="hidden" size="5"></select>
                     </div>
 
                     <div class="form-row">
@@ -47,13 +88,23 @@
 
                         <div class="form-group">
                             <label for="benchmark-type">Benchmark Type</label>
-                            <select id="benchmark-type">
+                            <select id="benchmark-type" onchange="app.updateBenchDescription()">
                                 <option value="quick">Quick (Single Context)</option>
                                 <option value="full" selected>Full (Multiple Contexts)</option>
                                 <option value="ai_tune">AI-Assisted Tuning</option>
                                 <option value="grid_search">Grid Search</option>
                             </select>
+                            <div id="bench-description" class="bench-description">
+                                Runs a full benchmark across multiple context lengths (512, 1024, 2048, 4096). Measures prefill and decode throughput at each length. Best for general performance profiling.
+                            </div>
                         </div>
+                    </div>
+
+                    <!-- Custom Engine Flags -->
+                    <div class="form-group">
+                        <label for="custom-flags">Custom Engine Flags (optional)</label>
+                        <input type="text" id="custom-flags" placeholder="--cache-type q4 --mlock --flash-attn">
+                        <small class="help-text">Extra flags passed to the engine (e.g., --mlock, --cache-type q4, --flash-attn)</small>
                     </div>
 
                     <div class="form-row" id="context-lengths-group">
@@ -81,11 +132,56 @@
                 </form>
             </section>
 
+            <!-- GPU Monitor Card - Always Visible -->
+            <section class="panel monitor-panel" id="monitor-panel">
+                <div id="monitor-card" class="monitor-card">
+                    <div class="monitor-header">
+                        <span class="monitor-title">GPU MONITOR</span>
+                        <div style="display:flex;gap:12px;align-items:center;">
+                            <span id="gpu-name-label" style="color:#475569;font-size:0.8rem;font-family:monospace;">RX 7900 XTX</span>
+                            <span id="monitor-timestamp" style="color:var(--text-secondary);font-size:0.75rem;font-family:monospace;"></span>
+                        </div>
+                    </div>
+
+                    <!-- GPU Stats Row -->
+                    <div class="gpu-stats-row">
+                        <div class="gpu-stat-item">
+                            <span style="color:#ff6b35;">&#x1f321;</span>
+                            <span id="gpu-temp" style="font-family:monospace;font-size:0.85rem;">--°C</span>
+                        </div>
+                        <div class="gpu-stat-item">
+                            <span style="color:#475569;">GPU:</span>
+                            <span id="gpu-util-label" style="font-family:monospace;font-size:0.85rem;">--%</span>
+                        </div>
+                        <div class="gpu-stat-item">
+                            <span style="color:#06b6d4;">MEM:</span>
+                            <span id="gpu-mem-label" style="font-family:monospace;font-size:0.85rem;">-- / -- GB</span>
+                        </div>
+                    </div>
+
+                    <!-- nvtop-style Canvas Graph -->
+                    <canvas id="gpu-graph-canvas" width="600" height="80" class="gpu-graph"></canvas>
+
+                    <!-- Progress Bar (shown during benchmark) -->
+                    <div class="monitor-progress hidden" id="benchmark-progress-container">
+                        <span id="gpu-progress-text" style="font-size:0.75rem;color:var(--text-secondary);">Ready</span>
+                        <div class="monitor-progress-bar"><div class="monitor-progress-fill" id="gpu-progress-bar"></div></div>
+                    </div>
+
+                    <!-- Terminal Log -->
+                    <div id="status-log" class="terminal-log"></div>
+
+                    <!-- Benchmark Controls -->
+                    <div class="benchmark-controls hidden" id="benchmark-controls">
+                        <div id="benchmark-status" class="status-bar"></div>
+                        <button id="cancel-btn" class="btn btn-danger" onclick="app.cancelBenchmark()">Cancel Benchmark</button>
+                    </div>
+                </div>
+            </section>
+
             <!-- Results Panel -->
             <section class="panel results-panel hidden" id="results-panel">
                 <h2>Results</h2>
-                
-                <div id="benchmark-status" class="status-bar"></div>
 
                 <!-- Charts Container -->
                 <div class="charts-container">
@@ -103,10 +199,16 @@
                         <h3>AI Tuning Progress</h3>
                         <canvas id="ai-tune-chart"></canvas>
                     </div>
+
+                    <div class="chart-card" id="grid-chart-card hidden">
+                        <h3>Grid Search Results (bubble size = throughput)</h3>
+                        <canvas id="grid-search-chart"></canvas>
+                    </div>
                 </div>
 
                 <!-- Results Table -->
                 <div class="results-table-container">
+                    <!-- Summary Table -->
                     <table id="results-table" class="data-table">
                         <thead>
                             <tr>
@@ -116,6 +218,25 @@
                         </thead>
                         <tbody></tbody>
                     </table>
+                    
+                    <!-- Detailed Breakdown (expandable) -->
+                    <div id="detail-toggle-container" class="hidden">
+                        <button id="toggle-details-btn" class="btn btn-secondary btn-details">Show Detailed Breakdown ▼</button>
+                        <div id="details-panel" class="details-panel hidden">
+                            <table id="details-table" class="data-table details-table">
+                                <thead>
+                                    <tr>
+                                        <th>Context</th>
+                                        <th>Prefill tok/s</th>
+                                        <th>Decode tok/s</th>
+                                        <th>Prompt ms/tok</th>
+                                        <th>Decode ms/tok</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </section>
 
