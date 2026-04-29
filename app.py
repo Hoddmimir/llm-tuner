@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hardware.detector import HardwareDetector
 from database import DatabaseManager
 from engines.llama_cpp import LlamaCppEngine
-from logging.benchmark_logger import logger as file_logger
+from benchlog.benchmark_logger import logger as file_logger
 
 
 # --- Models ---
