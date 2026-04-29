@@ -749,11 +749,8 @@ canvas {
     margin-top: 0.2rem;
 }
 
-/* Monitor Panel - Always Visible */
+/* Monitor Panel */
 .monitor-panel {
-    position: sticky;
-    top: 1rem;
-    z-index: 100;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
     border-radius: 8px;
