@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from hardware.detector import HardwareDetector
 from database import DatabaseManager
 from engines.llama_cpp import LlamaCppEngine
+from logging.benchmark_logger import logger as file_logger
 
 
 # --- Models ---
@@ -66,7 +67,12 @@ statuses_lock = Lock()
 
 # Cancellation tracking
 cancel_requests: dict[str, bool] = {}  # id -> cancelled flag
-gpu_poll_threads: dict[str, Thread] = {}  # id -> GPU polling thread
+
+# Global GPU monitor state
+_gpu_data: dict = {"gpu_memory_used_mb": 0, "gpu_memory_total_mb": 24576, "gpu_utilization_pct": 0}
+_gpu_lock = Lock()
+_gpu_poll_thread: Thread | None = None
+_gpu_running = False
 
 
 def _get_settings() -> dict:
@@ -88,7 +94,7 @@ def _save_settings(settings: dict):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
-    global db, hardware_cache, settings_path
+    global db, hardware_cache, settings_path, _gpu_running, _gpu_poll_thread
     
     # Initialize database
     db = DatabaseManager()
@@ -103,8 +109,16 @@ async def lifespan(app: FastAPI):
     
     print(f"LLM Tuner started. Hardware: {hardware_cache.get('vendor', 'unknown')}")
     
+    # Start global GPU monitor thread
+    _gpu_running = True
+    _gpu_poll_thread = Thread(target=_global_gpu_poll, daemon=True)
+    _gpu_poll_thread.start()
+    print("Global GPU monitor started (1s poll interval)")
+    
     yield
     
+    # Shutdown
+    _gpu_running = False
     if db:
         db.close()
 
@@ -120,8 +134,8 @@ app.add_middleware(
 )
 
 
-def _emit_status(benchmark_id: str, message: str, level: str = "info"):
-    """Emit a status update for a benchmark."""
+def _emit_status(benchmark_id: str, message: str, level: str = "info", source: str = "app"):
+    """Emit a status update for a benchmark — writes to both memory and file."""
     with statuses_lock:
         if benchmark_id not in benchmark_statuses:
             benchmark_statuses[benchmark_id] = {
@@ -136,6 +150,9 @@ def _emit_status(benchmark_id: str, message: str, level: str = "info"):
             "level": level
         }
         benchmark_statuses[benchmark_id]["messages"].append(entry)
+
+    # Also write to file-based log
+    file_logger.write(benchmark_id, message, level=level, source=source)
 
 
 def _set_progress(benchmark_id: str, current: int, total: int):
@@ -155,83 +172,121 @@ def _set_status(benchmark_id: str, status: str):
             benchmark_statuses[benchmark_id]["status"] = status
 
 
+# --- Global GPU Monitor (always-on) ---
+
 def _get_gpu_memory() -> dict:
-    """Query GPU memory usage via rocm-smi."""
-    try:
-        result = subprocess.run(
-            ["rocm-smi", "-a", "--json"],
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode == 0:
-            data = json.loads(result.stdout)
-            cards = data.get("cards", [])
-            if cards:
-                card = cards[0]
-                vram_usage = card.get("vram_usage", {})
-                used_mb = float(vram_usage.get("used", "0") or "0")
-                total_mb = float(vram_usage.get("total", "0") or "0")
-                
-                # Also get GPU utilization
-                gpu_util = float(card.get("gpu_usage", {}).get("gpu_core_clk_percent", "0") or "0")
-                
-                return {
-                    "gpu_memory_used_mb": round(used_mb, 1),
-                    "gpu_memory_total_mb": round(total_mb, 1),
-                    "gpu_utilization_pct": round(gpu_util, 1)
-                }
-    except Exception:
-        pass
+    """Query GPU memory usage via rocm-smi text output.
     
-    # Fallback - try text parsing
+    ROCm on consumer GPUs doesn't support --json flag reliably, so we parse text output.
+    """
     try:
         result = subprocess.run(
             ["rocm-smi", "-a"],
             capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0:
-            output = result.stdout
-            used_mb = 0.0
-            total_mb = 24576.0  # Default for RX 7900 XTX
-            
-            for line in output.split("\n"):
-                if "Vram Usage" in line or "VRAM Usage" in line:
-                    parts = line.replace(":", "").replace("%", "").split()
-                    try:
-                        used_mb = float(parts[1]) * total_mb / 100
-                    except (ValueError, IndexError):
-                        pass
-            
-            return {
-                "gpu_memory_used_mb": round(used_mb, 1),
-                "gpu_memory_total_mb": round(total_mb, 1)
-            }
-    except Exception:
-        pass
+            return _parse_rocm_smi_text(result.stdout)
+    except Exception as e:
+        print(f"[GPU MONITOR] Error running rocm-smi: {e}")
     
-    return {"gpu_memory_used_mb": 0, "gpu_memory_total_mb": 24576}
+    return {"gpu_memory_used_mb": 0, "gpu_memory_total_mb": 24576, "gpu_utilization_pct": 0}
 
 
-def _poll_gpu_memory(benchmark_id: str):
-    """Background thread that polls GPU memory every 2 seconds."""
-    while not cancel_requests.get(benchmark_id, False):
-        mem = _get_gpu_memory()
+def _parse_rocm_smi_text(output: str) -> dict:
+    """Parse rocm-smi text output for GPU stats.
+    
+    Handles various ROCm versions and formats.
+    """
+    used_mb = 0.0
+    total_mb = 24576.0  # Default for RX 7900 XTX
+    gpu_util = 0.0
+    gpu_name = "Unknown"
+
+    lines = output.split("\n")
+    
+    for line in lines:
+        stripped = line.strip()
         
-        # Emit as status message with type marker for frontend
-        with statuses_lock:
-            if benchmark_id in benchmark_statuses:
-                benchmark_statuses[benchmark_id]["gpu"] = {
-                    **mem,
-                    "timestamp": time.time()
-                }
+        # GPU name - look for "Device Name:" or similar
+        if "Device Name" in stripped and ":" in stripped:
+            parts = stripped.split(":", 1)
+            gpu_name = parts[1].strip() if len(parts) > 1 else "Unknown"
         
-        time.sleep(2)
+        # VRAM usage patterns:
+        # "Vram Usage              : card-0    20534 / 24576 MB (83%)"
+        # "VRAM Usage              : 20534 / 24576 MB"
+        if ("vram usage" in stripped.lower() or "vram" in stripped.lower()) and "/" in stripped:
+            try:
+                # Extract numbers around the slash
+                parts = stripped.split("/")
+                if len(parts) >= 2:
+                    # Find all numbers in the line
+                    nums = []
+                    for word in stripped.replace(",", "").split():
+                        try:
+                            val = float(word)
+                            nums.append(val)
+                        except ValueError:
+                            pass
+                    
+                    if len(nums) >= 2:
+                        used_mb = nums[0]
+                        total_mb = nums[1]
+            except (ValueError, IndexError):
+                pass
+        
+        # GPU utilization patterns:
+        # "Gpu use%                : card-0    45.3%"
+        # "GPU Core Clk Percent" or similar
+        if ("gpu use" in stripped.lower() or "gpu usage" in stripped.lower() or 
+            "core clk percent" in stripped.lower()) and "%" in stripped:
+            try:
+                nums = []
+                for word in stripped.replace("%", "").replace(",", "").split():
+                    try:
+                        val = float(word)
+                        if 0 <= val <= 100:
+                            nums.append(val)
+                    except ValueError:
+                        pass
+                if nums:
+                    gpu_util = nums[0]
+            except (ValueError, IndexError):
+                pass
+
+    return {
+        "gpu_memory_used_mb": round(used_mb, 1),
+        "gpu_memory_total_mb": round(total_mb, 1),
+        "gpu_utilization_pct": round(gpu_util, 1),
+        "gpu_name": gpu_name
+    }
+
+
+def _global_gpu_poll():
+    """Background thread that polls GPU stats every second — always running."""
+    global _gpu_data
+    while _gpu_running:
+        try:
+            data = _get_gpu_memory()
+            with _gpu_lock:
+                _gpu_data.update(data)
+                _gpu_data["timestamp"] = time.time()
+        except Exception as e:
+            print(f"[GPU MONITOR] Poll error: {e}")
+        time.sleep(1)
+
+
+def get_global_gpu_data() -> dict:
+    """Get the latest GPU data from the global monitor."""
+    with _gpu_lock:
+        return dict(_gpu_data)
 
 
 # --- SSE Endpoint ---
 
 @app.get("/api/benchmarks/{benchmark_id}/stream")
 async def stream_status(benchmark_id: str):
-    """Server-Sent Events for real-time benchmark progress."""
+    """Server-Sent Events for real-time benchmark progress + logs."""
     
     async def event_generator():
         last_count = 0
@@ -248,22 +303,24 @@ async def stream_status(benchmark_id: str):
                     yield f"data: {json.dumps(msg)}\n\n"
                 last_count = current_count
             
-            # Send progress updates with GPU memory data
+            # Always include GPU data in progress updates
             progress = status_data.get("progress", 0)
             status = status_data.get("status", "pending")
-            gpu_data = status_data.get("gpu", {})
             
-            if progress > 0 or status in ("completed", "failed"):
+            if progress > 0 or status in ("completed", "failed", "cancelled"):
+                gpu_info = get_global_gpu_data()
                 progress_msg = {
-                    'type': 'progress', 
-                    'value': progress, 
-                    'status': status
+                    'type': 'progress',
+                    'value': progress,
+                    'status': status,
+                    'gpu_memory_used_mb': gpu_info.get('gpu_memory_used_mb', 0),
+                    'gpu_memory_total_mb': gpu_info.get('gpu_memory_total_mb', 24576),
+                    'gpu_utilization_pct': gpu_info.get('gpu_utilization_pct', 0),
                 }
-                # Include GPU memory data if available
-                if gpu_data:
-                    progress_msg['gpu_memory_used_mb'] = gpu_data.get('gpu_memory_used_mb', 0)
-                    progress_msg['gpu_memory_total_mb'] = gpu_data.get('gpu_memory_total_mb', 24576)
-                    progress_msg['current_context'] = f"{status_data.get('current_step', 0)}/{status_data.get('total_steps', '?')}"
+                step = status_data.get('current_step', 0)
+                total = status_data.get('total_steps', '?')
+                if isinstance(total, int):
+                    progress_msg['current_context'] = f"{step}/{total}"
                 yield f"data: {json.dumps(progress_msg)}\n\n"
             
             # Check if benchmark is done
@@ -293,8 +350,8 @@ def get_hardware():
 
 @app.get("/api/gpu")
 def get_gpu_status():
-    """Get current GPU memory and utilization stats."""
-    return _get_gpu_memory()
+    """Get current GPU memory and utilization stats (always-on monitor)."""
+    return get_global_gpu_data()
 
 
 @app.get("/api/engines")
@@ -338,10 +395,18 @@ async def start_benchmark(request: BenchmarkRequest, background_tasks: Backgroun
             "total_steps": 0
         }
     
+    # Log to file
     _emit_status(benchmark_id, f"Starting benchmark: {request.benchmark_type}", "info")
     _emit_status(benchmark_id, f"Model: {Path(request.model_path).name}", "info")
+    _emit_status(benchmark_id, f"Config: max_tokens={request.max_tokens}, temp={request.temperature}, rounds={request.rounds}", "info")
     if request.custom_flags.strip():
         _emit_status(benchmark_id, f"Custom flags: {request.custom_flags}", "info")
+    
+    # Log GPU state at start
+    gpu_info = get_global_gpu_data()
+    _emit_status(benchmark_id, 
+                 f"GPU at start: {gpu_info.get('gpu_memory_used_mb', '?')}MB / {gpu_info.get('gpu_memory_total_mb', '?')}MB used",
+                 "info")
     
     # Create database record
     record = {
@@ -406,6 +471,28 @@ def get_benchmark_status(benchmark_id: str):
         "total_steps": live.get("total_steps", 0),
         "messages": live.get("messages", [])
     }
+
+
+@app.get("/api/benchmarks/{benchmark_id}/logs")
+def get_benchmark_logs(benchmark_id: str):
+    """Get file-based logs for a benchmark run."""
+    entries = file_logger.get_entries(benchmark_id)
+    if not entries:
+        # Try reading from disk as fallback
+        content = file_logger.get_file_contents(benchmark_id)
+        return {"benchmark_id": benchmark_id, "entries": [], "file_content": content}
+    
+    return {
+        "benchmark_id": benchmark_id,
+        "entries": entries,
+        "total_entries": len(entries)
+    }
+
+
+@app.get("/api/logs")
+def list_logs():
+    """List all available benchmark logs."""
+    return file_logger.list_logs()
 
 
 @app.get("/api/history")
@@ -543,11 +630,6 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
     """Run benchmark in background thread."""
     from engines.llama_cpp import LlamaCppEngine
     
-    # Start GPU memory polling thread
-    gpu_thread = Thread(target=_poll_gpu_memory, args=(benchmark_id,), daemon=True)
-    gpu_thread.start()
-    gpu_poll_threads[benchmark_id] = gpu_thread
-    
     try:
         # Update status to running
         db.update_status(benchmark_id, "running")
@@ -555,12 +637,14 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
         
         engine = LlamaCppEngine(
             request.model_path, 
-            status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+            status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level, source="engine")
         )
         
         # Check for cancellation before starting
         if cancel_requests.get(benchmark_id):
             raise Exception("Benchmark cancelled by user")
+        
+        results = None
         
         if request.benchmark_type == "quick":
             results = run_quick_benchmark(engine, request, benchmark_id)
@@ -577,21 +661,19 @@ def run_benchmark(benchmark_id: str, request: BenchmarkRequest):
         if cancel_requests.get(benchmark_id):
             raise Exception("Benchmark cancelled by user")
         
-        # Save results
+        # Save results to both DB and file log
         db.update_results(benchmark_id, results, "completed")
+        file_logger.save_results(benchmark_id, results)
         _set_status(benchmark_id, "completed")
         _emit_status(benchmark_id, "Benchmark completed successfully", "success")
         
     except Exception as e:
         error_msg = f"Benchmark failed: {e}"
         print(error_msg)
-        db.update_status(benchmark_id, "failed" if "cancelled" not in str(e).lower() else "cancelled", error=str(e))
-        _set_status(benchmark_id, "failed" if "cancelled" not in str(e).lower() else "cancelled")
-        _emit_status(benchmark_id, error_msg, "error" if "cancelled" not in str(e).lower() else "warning")
-    finally:
-        # Stop GPU polling
-        cancel_requests[benchmark_id] = True
-        gpu_poll_threads.pop(benchmark_id, None)
+        is_cancelled = "cancelled" in str(e).lower()
+        db.update_status(benchmark_id, "failed" if not is_cancelled else "cancelled", error=str(e))
+        _set_status(benchmark_id, "failed" if not is_cancelled else "cancelled")
+        _emit_status(benchmark_id, error_msg, "error" if not is_cancelled else "warning")
 
 
 def run_quick_benchmark(engine: LlamaCppEngine, request: BenchmarkRequest, 
@@ -632,7 +714,7 @@ def run_ai_tune(benchmark_id: str, request: BenchmarkRequest) -> dict:
     tuner = AITuner(
         request.model_path, 
         rounds=request.rounds,
-        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level, source="ai_tuner")
     )
     return tuner.run()
 
@@ -646,7 +728,7 @@ def run_grid_search(benchmark_id: str, request: BenchmarkRequest) -> dict:
     
     tuner = GridSearchTuner(
         request.model_path,
-        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level)
+        status_callback=lambda msg, level="info": _emit_status(benchmark_id, msg, level, source="grid_search")
     )
     return tuner.run()
 

@@ -33,7 +33,8 @@ class AITuner(BaseTuner):
 
         hw_profile = self._get_hardware_profile()
         gpu_name = hw_profile.get('gpu', 'Unknown')
-        self._log("Hardware: {}".format(gpu_name), "info")
+        vram_total = hw_profile.get('vram_total', '?')
+        self._log("Hardware: {} (VRAM: {})".format(gpu_name, vram_total), "info")
 
         model_info = self._get_model_metadata()
         if model_info:
@@ -61,6 +62,9 @@ class AITuner(BaseTuner):
 
             baseline_tps = list(baseline_results.values())[0].get("decode_tps", 0)
             self._log("Baseline: {:.1f} tok/s (decode)".format(baseline_tps), "success")
+            
+            # Log full baseline results for debugging
+            self._log("Full baseline results: {}".format(json.dumps(baseline_results)), "info")
 
             best_tps = baseline_tps
             best_config = {}
@@ -72,6 +76,10 @@ class AITuner(BaseTuner):
                     hw_profile=hw_profile, model_info=model_info,
                     baseline_tps=baseline_tps, history=self.history)
 
+                # Log the full prompt for debugging
+                self._log("Tuning prompt ({} chars):".format(len(prompt)), "info")
+                self._log(prompt[:500] + ("..." if len(prompt) > 500 else ""), "debug")
+
                 self._log("Sending tuning prompt to AI model...", "info")
                 suggested_flags = self._ask_model(prompt)
 
@@ -79,18 +87,34 @@ class AITuner(BaseTuner):
                     self._log("Model did not return valid flags, skipping round", "warning")
                     continue
 
-                self._log("AI suggested: {}".format(json.dumps(suggested_flags)), "info")
+                self._log("AI suggested raw response: {}".format(json.dumps(suggested_flags)), "info")
 
-                threads_val = suggested_flags.get('threads', 'default')
-                batch_val = suggested_flags.get('batch_size', 'default')
-                cache_val = suggested_flags.get('cache_type', 'default')
-                self._log("Testing: threads={}, batch={}, cache={}".format(
-                    threads_val, batch_val, cache_val), "info")
+                # Validate and clean up the suggestion
+                cleaned = self._clean_suggestion(suggested_flags)
+                self._log("Cleaned suggestion: {}".format(json.dumps(cleaned)), "info")
+
+                threads_val = cleaned.get('threads', 'default')
+                batch_val = cleaned.get('batch_size', 'default')
+                cache_val = cleaned.get('cache_type', 'default')
+                flash_val = cleaned.get('flash_attn', 'not set')
+                self._log("Testing: threads={}, batch={}, cache={}, flash={}".format(
+                    threads_val, batch_val, cache_val, flash_val), "info")
 
                 test_results = self.engine.benchmark(
-                    context_lengths=[2048], max_tokens=100, **suggested_flags)
+                    context_lengths=[2048], max_tokens=100, **cleaned)
+
+                # Log full test results for debugging
+                self._log("Full test results: {}".format(json.dumps(test_results)), "debug")
 
                 test_tps = list(test_results.values())[0].get("decode_tps", 0)
+                
+                if test_tps == 0:
+                    self._log("WARNING: Got 0 tok/s from benchmark — server may have crashed or failed to start", "error")
+                    # Check for errors in results
+                    for ctx, result in test_results.items():
+                        if isinstance(result, dict) and "error" in result:
+                            self._log("Error in context {}: {}".format(ctx, result["error"]), "error")
+
                 if baseline_tps > 0:
                     improvement = (test_tps - baseline_tps) / baseline_tps * 100
                 else:
@@ -99,13 +123,13 @@ class AITuner(BaseTuner):
                     test_tps, improvement), "success")
 
                 self.history.append({
-                    "round": round_num, "flags": suggested_flags,
+                    "round": round_num, "flags": cleaned,
                     "tps": test_tps, "improvement": improvement})
 
                 if test_tps > best_tps:
                     best_tps = test_tps
-                    best_config = suggested_flags
-                    self._log("** New best! {:.1f} tok/s".format(test_tps), "success")
+                    best_config = cleaned
+                    self._log("** New best! {:.1f} tok/s".format(best_tps), "success")
 
             if baseline_tps > 0:
                 overall_improvement = (best_tps - baseline_tps) / baseline_tps * 100
@@ -121,6 +145,53 @@ class AITuner(BaseTuner):
         finally:
             self._log("Stopping persistent AI server...", "info")
             ai_engine.stop_server()
+
+    def _clean_suggestion(self, raw: dict) -> dict:
+        """Clean and validate AI suggestion before passing to engine."""
+        cleaned = {}
+        
+        # threads - must be positive int
+        if 'threads' in raw:
+            try:
+                t = int(raw['threads'])
+                if 1 <= t <= 64:
+                    cleaned['threads'] = t
+                else:
+                    self._log("Thread count {} out of range, using default".format(t), "warning")
+            except (ValueError, TypeError):
+                self._log("Invalid thread value: {}".format(raw['threads']), "warning")
+
+        # batch_size - must be positive int
+        if 'batch_size' in raw:
+            try:
+                b = int(raw['batch_size'])
+                if 64 <= b <= 8192:
+                    cleaned['batch_size'] = b
+                else:
+                    self._log("Batch size {} out of range, using default".format(b), "warning")
+            except (ValueError, TypeError):
+                self._log("Invalid batch value: {}".format(raw['batch_size']), "warning")
+
+        # cache_type - must be valid type string
+        if 'cache_type' in raw:
+            ct = str(raw['cache_type']).strip().lower()
+            if ct in ('q4_0', 'f16', 'q8_0', 'bf16'):
+                cleaned['cache_type'] = ct
+            else:
+                self._log("Invalid cache type '{}', skipping".format(ct), "warning")
+
+        # flash_attn - normalize to on/off string or omit
+        if 'flash_attn' in raw:
+            fa = str(raw['flash_attn']).strip().lower()
+            if fa in ('on', 'true', 'auto'):
+                cleaned['flash_attn'] = 'on'
+            elif fa in ('off', 'false'):
+                # Don't include — engine won't add the flag
+                pass
+            else:
+                self._log("Invalid flash_attn value '{}', skipping".format(fa), "warning")
+
+        return cleaned
 
     def _run_heuristic_fallback(self, hw_profile, model_info) -> dict:
         """Fallback when AI server can't start - use heuristic configs."""
@@ -174,17 +245,41 @@ class AITuner(BaseTuner):
 
         try:
             result = subprocess.run(
-                ["rocm-smi", "-a", "--json"],
+                ["rocm-smi", "-a"],
                 capture_output=True, text=True, timeout=5)
+            
             if result.returncode == 0:
-                data = json.loads(result.stdout)
-                if "cards" in data and len(data["cards"]) > 0:
-                    card = data["cards"][0]
-                    hw["gpu"] = card.get("card_serial", "Unknown")
-                    vram = card.get("vram_usage", {})
-                    hw["vram_total"] = vram.get("total", "Unknown")
+                output = result.stdout
+                
+                # Parse GPU name
+                for line in output.split("\n"):
+                    if "Device Name" in line and ":" in line:
+                        parts = line.split(":", 1)
+                        hw["gpu"] = parts[1].strip() if len(parts) > 1 else "Unknown"
+                    
+                    # Parse VRAM total
+                    if ("vram usage" in line.lower()) and "/" in line:
+                        try:
+                            nums = []
+                            for word in line.replace(",", "").split():
+                                try:
+                                    val = float(word)
+                                    nums.append(val)
+                                except ValueError:
+                                    pass
+                            if len(nums) >= 2:
+                                hw["vram_total"] = "{} MB".format(int(nums[1]))
+                        except (ValueError, IndexError):
+                            pass
+            else:
+                self._log("rocm-smi returned non-zero exit code: {}".format(result.returncode), "warning")
+                if result.stderr:
+                    self._log("rocm-smi stderr: {}".format(result.stderr[:200]), "debug")
+                    
+        except FileNotFoundError:
+            self._log("rocm-smi not found in PATH", "warning")
         except Exception as e:
-            print("Warning: Could not get GPU info: {}".format(e))
+            self._log("Could not get GPU info: {}".format(e), "warning")
 
         return hw
 
@@ -210,8 +305,10 @@ class AITuner(BaseTuner):
 
             return metadata
 
+        except FileNotFoundError:
+            self._log("llama-llama not found, skipping model metadata", "debug")
         except Exception as e:
-            print("Warning: Could not get model metadata: {}".format(e))
+            self._log("Could not get model metadata: {}".format(e), "debug")
             return {}
 
     def _build_tuning_prompt(self, hw_profile, model_info, baseline_tps, history):
@@ -272,6 +369,9 @@ class AITuner(BaseTuner):
                 data = response.json()
                 text = data.get("content", "")
                 self._log("Model responded ({} chars)".format(len(text)), "info")
+                
+                # Log the raw response for debugging
+                self._log("Raw model output: {}".format(text[:300].replace("\n", "\\n")), "debug")
 
                 result = self._extract_json(text)
                 if not result:
@@ -295,14 +395,21 @@ class AITuner(BaseTuner):
         end = text.rfind('}') + 1
 
         if start == -1 or end == 0:
+            self._log("No curly braces found in response", "warning")
             return {}
 
         json_str = text[start:end]
+        self._log("Extracted JSON candidate: {}".format(json_str[:200]), "debug")
 
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            print("Warning: Could not parse JSON from model response")
+            result = json.loads(json_str)
+            if isinstance(result, dict):
+                return result
+            else:
+                self._log("JSON parsed but not a dict: {}".format(type(result).__name__), "warning")
+                return {}
+        except json.JSONDecodeError as e:
+            self._log("JSON parse error: {}".format(e), "warning")
             return {}
 
     def get_recommendations(self) -> list:

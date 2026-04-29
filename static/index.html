@@ -240,6 +240,23 @@
                 </div>
             </section>
 
+            <!-- Logs Viewer Panel -->
+            <section class="panel logs-panel hidden" id="logs-panel">
+                <h2>Benchmark Logs <span id="log-bench-id" style="font-size:0.7em;color:#64748b;font-family:monospace;"></span></h2>
+                
+                <div class="logs-controls">
+                    <select id="log-select" onchange="app.loadLog(this.value)">
+                        <option value="">-- Select benchmark log --</option>
+                    </select>
+                    <button id="refresh-logs-btn" class="btn btn-secondary" onclick="app.refreshLogsList()">Refresh List</button>
+                    <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;">
+                        <input type="checkbox" id="auto-scroll-log" checked> Auto-scroll
+                    </label>
+                </div>
+                
+                <div id="log-content" class="terminal-log log-viewer"></div>
+            </section>
+
             <!-- History Panel -->
             <section class="panel history-panel">
                 <h2>Benchmark History</h2>

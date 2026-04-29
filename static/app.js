@@ -416,6 +416,7 @@ class LLMTunerApp {
             this.showResultsPanel();
             this.showBenchmarkControls();
             this.clearStatusLog();
+            this.hideViewLogsButton();
             this.addStatusMessage('⏳ Benchmark queued...', 'info');
             
             // Start SSE connection for real-time updates
@@ -558,7 +559,31 @@ class LLMTunerApp {
         const progressContainer = document.getElementById('benchmark-progress-container');
         if (controls) controls.classList.add('hidden');
         if (progressContainer) progressContainer.classList.add('hidden');
-        // GPU monitor stays visible - graph + terminal persist
+        
+        // Show "View Logs" button after benchmark completes/fails
+        this.showViewLogsButton();
+    }
+
+    showViewLogsButton() {
+        let logBtn = document.getElementById('view-logs-btn');
+        if (!logBtn) {
+            const statusLog = document.getElementById('status-log');
+            if (statusLog) {
+                logBtn = document.createElement('button');
+                logBtn.id = 'view-logs-btn';
+                logBtn.className = 'btn btn-secondary';
+                logBtn.textContent = '📋 View Full Logs';
+                logBtn.onclick = () => this.showLogsForBenchmark(this.currentBenchmark);
+                statusLog.parentNode.insertBefore(logBtn, statusLog.nextSibling);
+            }
+        } else {
+            logBtn.classList.remove('hidden');
+        }
+    }
+
+    hideViewLogsButton() {
+        const logBtn = document.getElementById('view-logs-btn');
+        if (logBtn) logBtn.classList.add('hidden');
     }
 
     startPolling(benchmarkId) {
@@ -1197,6 +1222,107 @@ class LLMTunerApp {
         } catch (error) {
             console.error('Failed to load benchmark:', error);
         }
+    }
+
+    /* --- Log Viewer --- */
+
+    async refreshLogsList() {
+        try {
+            const response = await fetch(`${this.apiBase}/api/logs`);
+            const logs = await response.json();
+            
+            const select = document.getElementById('log-select');
+            select.innerHTML = '<option value="">-- Select benchmark log --</option>';
+            
+            logs.forEach(log => {
+                const option = document.createElement('option');
+                option.value = log.id;
+                const sizeKB = (log.size_bytes / 1024).toFixed(1);
+                option.textContent = `${log.id} (${log.lines} lines, ${sizeKB} KB) - ${new Date(log.modified_at).toLocaleString()}`;
+                select.appendChild(option);
+            });
+        } catch (error) {
+            console.error('Failed to load logs list:', error);
+        }
+    }
+
+    async loadLog(benchmarkId) {
+        if (!benchmarkId) return;
+        
+        const logContent = document.getElementById('log-content');
+        const logBenchId = document.getElementById('log-bench-id');
+        
+        logBenchId.textContent = `(${benchmarkId})`;
+        logContent.innerHTML = '<div class="log-entry log-info">Loading logs...</div>';
+        
+        // Show the logs panel if hidden
+        document.getElementById('logs-panel').classList.remove('hidden');
+        
+        try {
+            const response = await fetch(`${this.apiBase}/api/benchmarks/${benchmarkId}/logs`);
+            const data = await response.json();
+            
+            logContent.innerHTML = '';
+            
+            if (data.entries && data.entries.length > 0) {
+                // Render structured entries
+                data.entries.forEach(entry => {
+                    const div = document.createElement('div');
+                    div.className = `log-entry log-${entry.level || 'info'}`;
+                    
+                    const time = new Date(entry.ts).toLocaleTimeString();
+                    const source = entry.source ? `[${entry.source}]` : '';
+                    div.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-level">[${(entry.level || 'info').toUpperCase()}]</span> ${source} <span class="log-msg">${this.escapeHtml(entry.msg)}</span>`;
+                    
+                    logContent.appendChild(div);
+                });
+            } else if (data.file_content) {
+                // Render raw file content
+                const lines = data.file_content.split('\n').filter(l => l.trim());
+                lines.forEach(line => {
+                    const div = document.createElement('div');
+                    div.className = 'log-entry log-info';
+                    
+                    // Try to parse structured format: [timestamp] [LEVEL] [source] message
+                    const match = line.match(/^\[([^\]]+)\]\s*\[([^\]]+)\]\s*\[([^\]]+)\]\s*(.*)$/);
+                    if (match) {
+                        const [, time, level, source, msg] = match;
+                        div.className = `log-entry log-${level.toLowerCase()}`;
+                        div.innerHTML = `<span class="log-time">[${time}]</span> <span class="log-level">[${level.toUpperCase()}]</span> [${source}] <span class="log-msg">${this.escapeHtml(msg)}</span>`;
+                    } else {
+                        div.textContent = line;
+                    }
+                    
+                    logContent.appendChild(div);
+                });
+            } else {
+                logContent.innerHTML = '<div class="log-entry log-warning">No logs found for this benchmark.</div>';
+            }
+            
+            // Auto-scroll to bottom
+            if (document.getElementById('auto-scroll-log').checked) {
+                logContent.scrollTop = logContent.scrollHeight;
+            }
+        } catch (error) {
+            console.error('Failed to load logs:', error);
+            logContent.innerHTML = `<div class="log-entry log-error">Error loading logs: ${this.escapeHtml(error.message)}</div>`;
+        }
+    }
+
+    escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    showLogsForBenchmark(benchmarkId) {
+        // Show logs panel and load the log for this benchmark
+        document.getElementById('logs-panel').classList.remove('hidden');
+        this.refreshLogsList().then(() => {
+            const select = document.getElementById('log-select');
+            select.value = benchmarkId;
+            this.loadLog(benchmarkId);
+        });
     }
 }
 

@@ -17,11 +17,13 @@ class LlamaCppEngine(BaseEngine):
     """Backend for llama.cpp inference server with ROCm/HIP support."""
     
     def __init__(self, model_path: str, port: int = 8081, 
-                 server_binary: str = None, status_callback: Callable = None):
+                 server_binary: str = None, status_callback: Callable = None,
+                 benchmark_id: str = None):
         super().__init__(model_path, port)
         self.server_binary = server_binary or self._find_server()
         self.process = None
         self.status_callback = status_callback
+        self.benchmark_id = benchmark_id
     
     def _log(self, message: str, level: str = "info"):
         """Log a message through the callback if available."""
@@ -97,7 +99,7 @@ class LlamaCppEngine(BaseEngine):
         # Silently ignore unsupported flags from AI suggestions
         # Supported flags: --threads, --batch-size, --cache-type-k, --flash-attn, --ctx-size, --tensor-split
 
-        self._log(f"Command: {' '.join(cmd[:5])}...")
+        self._log(f"Command: {' '.join(cmd)}")
         
         try:
             self.process = subprocess.Popen(
@@ -114,9 +116,15 @@ class LlamaCppEngine(BaseEngine):
                     for line in self.process.stdout:
                         line = line.strip()
                         if line:
-                            # Only log interesting lines to avoid spam
-                            if any(kw in line.lower() for kw in ['load', 'error', 'warn', 'ggml', 'tensor', 'compute', 'speculative', 'kv cache', 'logits']):
+                            # Log ALL server lines at debug level, interesting ones at info
+                            if any(kw in line.lower() for kw in ['load', 'error', 'warn', 'ggml', 
+                                    'tensor', 'compute', 'speculative', 'kv cache', 'logits',
+                                    'ready', 'model loaded', 'offload', 'sched_reserve']):
                                 self._log(f"[server] {line}", "info")
+                            else:
+                                # Still log to file via callback with debug level
+                                if self.status_callback:
+                                    self.status_callback(f"[server] {line}", "debug")
                 except Exception as e:
                     self._log(f"Output stream error: {e}", "warning")
             
@@ -376,23 +384,25 @@ class LlamaCppEngine(BaseEngine):
         """Get current VRAM usage."""
         try:
             result = subprocess.run(
-                ["rocm-smi", "-a", "--json"],
+                ["rocm-smi", "-a"],
                 capture_output=True, text=True, timeout=5
             )
             
             if result.returncode == 0:
-                data = json.loads(result.stdout)
-                
-                # Find first card
-                for key in data:
-                    if key.startswith("card"):
-                        card = data[key]
-                        vram_pct = float(card.get("GPU Memory Allocated (VRAM%)", "0") or "0")
-                        
-                        return {
-                            "vram_allocated_pct": vram_pct,
-                            "gpu_name": card.get("Device Name", "Unknown")
-                        }
+                # Parse text output for VRAM info
+                for line in result.stdout.split("\n"):
+                    if "Vram Usage" in line or "VRAM Usage" in line:
+                        parts = line.replace(":", "").replace("%", "").split()
+                        try:
+                            used_mb = float(parts[1])
+                            total_mb = float(parts[2])
+                            return {
+                                "vram_used_mb": used_mb,
+                                "vram_total_mb": total_mb,
+                                "vram_pct": round(used_mb / total_mb * 100, 1) if total_mb > 0 else 0
+                            }
+                        except (ValueError, IndexError):
+                            pass
         except Exception as e:
             self._log(f"Error getting memory usage: {e}", "warning")
         

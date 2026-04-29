@@ -907,3 +907,90 @@ canvas {
         grid-template-columns: 1fr;
     }
 }
+/* Log Viewer Panel */
+.logs-panel { }
+
+.logs-controls {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+#log-select {
+    flex: 1;
+    min-width: 200px;
+    font-family: monospace;
+    font-size: 0.85rem;
+}
+
+.log-viewer {
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 1rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    border: 1px solid var(--border-color);
+}
+
+[data-theme="dark"] .log-viewer {
+    background: #0d1117;
+}
+
+.log-level {
+    font-weight: 600;
+    margin-right: 0.25rem;
+}
+
+/* View Logs button */
+#view-logs-btn {
+    margin-top: 0.75rem;
+}
+
+/* Log Viewer Panel */
+.logs-panel { }
+
+.logs-controls {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+}
+
+#log-select {
+    flex: 1;
+    min-width: 200px;
+    font-family: monospace;
+    font-size: 0.85rem;
+}
+
+.log-viewer {
+    max-height: 400px;
+    overflow-y: auto;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+    padding: 1rem;
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 0.82rem;
+    line-height: 1.5;
+    border: 1px solid var(--border-color);
+}
+
+[data-theme="dark"] .log-viewer {
+    background: #0d1117;
+}
+
+.log-level {
+    font-weight: 600;
+    margin-right: 0.25rem;
+}
+
+/* View Logs button */
+#view-logs-btn {
+    margin-top: 0.75rem;
+}
